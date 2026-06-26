@@ -1,0 +1,59 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.pyright/
+.coverage
+htmlcov/
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Build and packaging artifacts
+build/
+dist/
+*.egg-info/
+
+# IDE and editor metadata
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Local configuration and secrets
+.env
+.env.*
+!.env.example
+*.local
+*secret*
+*secrets*
+*credential*
+*credentials*
+*api_key*
+*api_keys*
+API keys - DO NOT ADD TO GIT.txt
+
+# Logs and runtime files
+*.log
+logs/
+tmp/
+temp/
+
+# Generated translation/document outputs
+outputs/
+output/
+exports/
+translated/
+translations/
+artifacts/
+
+# OS files
+.DS_Store
+Thumbs.db
+desktop.ini

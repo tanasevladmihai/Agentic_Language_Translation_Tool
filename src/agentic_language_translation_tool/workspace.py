@@ -222,6 +222,16 @@ def _next_command(stage: JobStage, pending: list[str], workspace: Path) -> str:
         return f"Open the next pending batch `{pending[0]}` in `{workspace}`."
     if stage == JobStage.TRANSLATION_PLANNED:
         return f"altt validate-workspace {workspace}"
+    if stage == JobStage.PARTIALLY_TRANSLATED:
+        return f"altt apply-translations {workspace} --translations <path>"
+    if stage == JobStage.VERIFICATION_PLANNED:
+        return f"altt validate {workspace}"
+    if stage == JobStage.CORRECTIONS_PLANNED:
+        return f"altt plan-corrections {workspace}"
+    if stage == JobStage.VALIDATED:
+        return f"altt rebuild {workspace} --output <path>"
+    if stage == JobStage.BLOCKED:
+        return f"Inspect {workspace / RESUME_FILE} and resolve blocker findings."
     return f"altt resume {workspace}"
 
 

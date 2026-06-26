@@ -90,20 +90,27 @@ def extract_markdown(text: str, source_path: Path) -> ExtractionResult:
     for index, block in enumerate(blocks):
         block_type = _markdown_block_type(block)
         translatable = block_type != "code_fence"
-        structure_blocks.append({"index": index, "type": block_type, "translatable": translatable})
+        structure_block: dict[str, object] = {
+            "index": index,
+            "type": block_type,
+            "translatable": translatable,
+            "text": block,
+        }
         if not translatable:
+            structure_blocks.append(structure_block)
             continue
         style_tags = [block_type]
-        segments.append(
-            _make_segment(
-                source_text=block,
-                document_format="markdown",
-                source_path=source_path,
-                index=index,
-                path=[block_type, str(index + 1)],
-                style_tags=style_tags,
-            )
+        segment = _make_segment(
+            source_text=block,
+            document_format="markdown",
+            source_path=source_path,
+            index=index,
+            path=[block_type, str(index + 1)],
+            style_tags=style_tags,
         )
+        structure_block["segment_id"] = segment.segment_id
+        structure_blocks.append(structure_block)
+        segments.append(segment)
     return ExtractionResult(
         document_format="markdown",
         segments=segments,

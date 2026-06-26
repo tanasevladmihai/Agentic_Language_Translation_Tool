@@ -130,6 +130,43 @@ class VerificationFinding(WorkspaceModel):
     correction_guidance: str = ""
 
 
+class TranslationRecord(WorkspaceModel):
+    """A translated segment row produced by an agent."""
+
+    segment_id: str
+    translated_text: str
+    notes: list[str] = Field(default_factory=list)
+
+    @field_validator("segment_id", "translated_text")
+    @classmethod
+    def require_non_empty(cls, value: str) -> str:
+        """Reject empty translation identifiers and text."""
+        if not value.strip():
+            raise ValueError("value must not be empty")
+        return value
+
+
+class QaIssue(WorkspaceModel):
+    """A deterministic QA issue found in a workspace."""
+
+    issue_id: str
+    segment_id: str | None = None
+    category: str
+    severity: FindingSeverity
+    explanation: str
+
+
+class QaReport(WorkspaceModel):
+    """Deterministic QA report for a workspace."""
+
+    job_id: str
+    workspace_path: str
+    checked_at: datetime = Field(default_factory=utc_now)
+    passed: bool
+    issue_count: int
+    issues: list[QaIssue] = Field(default_factory=list)
+
+
 class JobState(WorkspaceModel):
     """Resumable state summary for a translation job."""
 

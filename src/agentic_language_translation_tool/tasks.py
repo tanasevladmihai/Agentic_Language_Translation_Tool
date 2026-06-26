@@ -5,7 +5,12 @@ from __future__ import annotations
 from pathlib import Path
 
 from agentic_language_translation_tool.io import atomic_write_text
-from agentic_language_translation_tool.models import Batch, BatchPurpose, Segment
+from agentic_language_translation_tool.models import (
+    Batch,
+    BatchPurpose,
+    Segment,
+    VerificationFinding,
+)
 
 
 def estimate_tokens(text: str) -> int:
@@ -79,6 +84,36 @@ def render_verification_batch(batch: Batch, segments: list[Segment]) -> str:
     ]
     for segment in segments:
         lines.extend(_segment_section(segment, include_translation_placeholder=True))
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def render_correction_batch(
+    batch: Batch,
+    segment: Segment,
+    findings: list[VerificationFinding],
+) -> str:
+    """Render a focused correction task for failed verification findings."""
+    lines = [
+        f"# Correction Batch {batch.batch_id}",
+        "",
+        "Revise the current translation so it preserves the original meaning,",
+        "formatting constraints, placeholders, protected terms, and document style.",
+        "Return JSONL with `segment_id` and corrected `translated_text` fields.",
+        "",
+    ]
+    lines.extend(_segment_section(segment, include_translation_placeholder=True))
+    lines.extend(["## Verification Findings", ""])
+    for finding in findings:
+        lines.extend(
+            [
+                f"- Severity: `{finding.severity.value}`",
+                f"- Category: `{finding.category.value}`",
+                f"- Explanation: {finding.explanation}",
+                f"- Evidence: {finding.evidence or '(none)'}",
+                f"- Correction guidance: {finding.correction_guidance or '(none)'}",
+                "",
+            ]
+        )
     return "\n".join(lines).rstrip() + "\n"
 
 

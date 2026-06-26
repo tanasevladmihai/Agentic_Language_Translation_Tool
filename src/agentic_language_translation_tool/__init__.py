@@ -9,7 +9,10 @@ from agentic_language_translation_tool.models import (
     JobManifest,
     JobStage,
     JobState,
+    QaIssue,
+    QaReport,
     Segment,
+    TranslationRecord,
     VerificationFinding,
 )
 
@@ -24,6 +27,9 @@ __all__ = [
     "JobManifest",
     "JobStage",
     "JobState",
+    "QaIssue",
+    "QaReport",
     "Segment",
+    "TranslationRecord",
     "VerificationFinding",
 ]

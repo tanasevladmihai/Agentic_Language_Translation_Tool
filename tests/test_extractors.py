@@ -44,5 +44,6 @@ def test_inspect_reports_planned_plugin_stubs(tmp_path: Path) -> None:
 
     metadata = inspect_input(source)
 
-    assert metadata["supported"] is False
-    assert metadata["planned_plugin_stubs"] == ["docx", "pdf"]
+    assert metadata["supported"] is True
+    assert metadata["extraction_supported"] is True
+    assert metadata["same_format_rebuild_supported"] is False

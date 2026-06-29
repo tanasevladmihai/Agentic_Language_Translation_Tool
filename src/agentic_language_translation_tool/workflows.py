@@ -6,7 +6,7 @@ import json
 import re
 import shutil
 from pathlib import Path
-from typing import cast
+from typing import TypeGuard, cast
 
 from agentic_language_translation_tool.io import (
     atomic_write_json,
@@ -192,11 +192,22 @@ def rebuild_document(workspace: Path, output: Path, *, force: bool = False) -> P
     document_format = str(structure.get("format", ""))
     if document_format == "txt":
         content = _rebuild_txt(segments)
+        atomic_write_text(output, content)
     elif document_format == "markdown":
         content = _rebuild_markdown(structure, segments)
+        atomic_write_text(output, content)
+    elif document_format == "docx":
+        _rebuild_docx(workspace, structure, segments, output)
+    elif document_format == "pdf":
+        if output.suffix.lower() == ".pdf" and not force:
+            raise WorkspaceError(
+                "exact visual PDF recreation is future work; choose a Markdown output path "
+                "or pass --force to write translated Markdown content anyway"
+            )
+        content = _rebuild_pdf_markdown(structure, segments)
+        atomic_write_text(output, content)
     else:
         raise WorkspaceError(f"rebuild unsupported for format: {document_format}")
-    atomic_write_text(output, content)
     manifest.state.stage = JobStage.REBUILT
     _save_and_resume(workspace, manifest)
     return output
@@ -485,6 +496,103 @@ def _rebuild_markdown(structure: dict[str, object], segments: list[Segment]) -> 
         else:
             rebuilt.append(text)
     return "\n\n".join(rebuilt).rstrip() + "\n"
+
+
+def _rebuild_docx(
+    workspace: Path,
+    structure: dict[str, object],
+    segments: list[Segment],
+    output: Path,
+) -> None:
+    from docx import Document
+
+    source_file = structure.get("source_file")
+    if not isinstance(source_file, str):
+        raise WorkspaceError("invalid docx structure: missing source_file")
+    source_path = workspace / "source" / source_file
+    if not source_path.exists():
+        raise WorkspaceError(f"missing source DOCX in workspace: {source_path}")
+    output.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(source_path, output)
+    document = Document(str(output))
+    translated_by_id = {segment.segment_id: segment.translated_text for segment in segments}
+    blocks = structure.get("blocks")
+    if not isinstance(blocks, list):
+        raise WorkspaceError("invalid docx structure: missing blocks")
+    for block in blocks:
+        if not isinstance(block, dict):
+            raise WorkspaceError("invalid docx structure block")
+        segment_id = block.get("segment_id")
+        path_value = block.get("path")
+        if not isinstance(segment_id, str) or not _is_path_list(path_value):
+            raise WorkspaceError("invalid docx structure block fields")
+        translation = translated_by_id.get(segment_id)
+        if not translation:
+            continue
+        if path_value[0] == "paragraph":
+            paragraph_index = int(path_value[1]) - 1
+            _replace_paragraph_text(document.paragraphs[paragraph_index], translation)
+        elif path_value[0] == "table":
+            table_index = int(path_value[1]) - 1
+            row_index = int(path_value[3]) - 1
+            cell_index = int(path_value[5]) - 1
+            cell = document.tables[table_index].rows[row_index].cells[cell_index]
+            _replace_cell_text(cell, translation)
+    document.save(str(output))
+
+
+def _rebuild_pdf_markdown(structure: dict[str, object], segments: list[Segment]) -> str:
+    translated_by_id = {segment.segment_id: segment.translated_text for segment in segments}
+    pages = structure.get("pages")
+    if not isinstance(pages, list):
+        raise WorkspaceError("invalid pdf structure: missing pages")
+    lines = ["# Translated PDF Text", ""]
+    warnings = structure.get("warnings", [])
+    if isinstance(warnings, list) and warnings:
+        lines.extend(["## Extraction Warnings", ""])
+        for warning in warnings:
+            lines.append(f"- {warning}")
+        lines.append("")
+    for page in pages:
+        if not isinstance(page, dict):
+            raise WorkspaceError("invalid pdf page structure")
+        page_number = page.get("page_number")
+        blocks = page.get("blocks")
+        if not isinstance(page_number, int) or not isinstance(blocks, list):
+            raise WorkspaceError("invalid pdf page fields")
+        lines.extend([f"## Page {page_number}", ""])
+        for block in blocks:
+            if not isinstance(block, dict):
+                raise WorkspaceError("invalid pdf block structure")
+            segment_id = block.get("segment_id")
+            text = block.get("text")
+            if not isinstance(segment_id, str) or not isinstance(text, str):
+                raise WorkspaceError("invalid pdf block fields")
+            lines.extend([translated_by_id.get(segment_id) or text, ""])
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def _replace_paragraph_text(paragraph: object, text: str) -> None:
+    runs = getattr(paragraph, "runs", [])
+    if runs:
+        runs[0].text = text
+        for run in runs[1:]:
+            run.text = ""
+    else:
+        paragraph.add_run(text)  # type: ignore[attr-defined]
+
+
+def _replace_cell_text(cell: object, text: str) -> None:
+    paragraphs = getattr(cell, "paragraphs", [])
+    if not paragraphs:
+        return
+    _replace_paragraph_text(paragraphs[0], text)
+    for paragraph in paragraphs[1:]:
+        _replace_paragraph_text(paragraph, "")
+
+
+def _is_path_list(value: object) -> TypeGuard[list[str]]:
+    return isinstance(value, list) and all(isinstance(part, str) for part in value)
 
 
 def _save_and_resume(workspace: Path, manifest: JobManifest) -> None:

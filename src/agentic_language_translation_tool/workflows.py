@@ -8,6 +8,7 @@ import shutil
 from pathlib import Path
 from typing import TypeGuard, cast
 
+from agentic_language_translation_tool.adversarial_qa import detect_adversarial_qa_issues
 from agentic_language_translation_tool.glossary import (
     GLOSSARY_FILE,
     enrich_segments_with_glossary,
@@ -60,6 +61,15 @@ from agentic_language_translation_tool.workspace import (
 QA_REPORT_JSON = "qa_report.json"
 QA_REPORT_MD = "qa_report.md"
 MARKDOWN_LINK_PATTERN = re.compile(r"\[[^\]]+\]\(([^)]+)\)")
+OBJECTIVE_DUPLICATE_SUPPRESSORS = {
+    "placeholder_drift",
+    "protected_term_damage",
+    "required_translation_missing",
+    "preferred_translation_missing",
+    "forbidden_translation_used",
+    "do_not_translate_term_changed",
+    "markdown_link_damage",
+}
 
 
 def apply_glossary(workspace: Path, glossary: Path) -> JobManifest:
@@ -360,9 +370,10 @@ def _actionable_findings_by_segment(
 def _translation_issues(segments: list[Segment], glossary: Glossary | None) -> list[QaIssue]:
     issues: list[QaIssue] = []
     for segment in segments:
+        segment_issues: list[QaIssue] = []
         translation = segment.translated_text or ""
         if not translation.strip():
-            issues.append(
+            segment_issues.append(
                 _issue(
                     segment.segment_id,
                     "missing_translation",
@@ -370,13 +381,14 @@ def _translation_issues(segments: list[Segment], glossary: Glossary | None) -> l
                     "Missing translation.",
                 )
             )
+            issues.extend(segment_issues)
             continue
         source_placeholders = set(segment.placeholders)
         missing_placeholders = sorted(
             token for token in source_placeholders if token not in translation
         )
         if missing_placeholders:
-            issues.append(
+            segment_issues.append(
                 _issue(
                     segment.segment_id,
                     "placeholder_drift",
@@ -386,7 +398,7 @@ def _translation_issues(segments: list[Segment], glossary: Glossary | None) -> l
             )
         missing_terms = sorted(term for term in segment.protected_terms if term not in translation)
         if missing_terms:
-            issues.append(
+            segment_issues.append(
                 _issue(
                     segment.segment_id,
                     "protected_term_damage",
@@ -395,7 +407,7 @@ def _translation_issues(segments: list[Segment], glossary: Glossary | None) -> l
                 )
             )
         if segment.source_text.strip() == translation.strip():
-            issues.append(
+            segment_issues.append(
                 _issue(
                     segment.segment_id,
                     "untranslated_text",
@@ -404,7 +416,7 @@ def _translation_issues(segments: list[Segment], glossary: Glossary | None) -> l
                 )
             )
         if _has_length_anomaly(segment.source_text, translation):
-            issues.append(
+            segment_issues.append(
                 _issue(
                     segment.segment_id,
                     "length_anomaly",
@@ -413,10 +425,30 @@ def _translation_issues(segments: list[Segment], glossary: Glossary | None) -> l
                 )
             )
         if "markdown" in segment.format:
-            issues.extend(_markdown_link_issues(segment, translation))
+            segment_issues.extend(_markdown_link_issues(segment, translation))
         if glossary is not None:
-            issues.extend(_terminology_issues(segment, glossary, translation))
+            segment_issues.extend(_terminology_issues(segment, glossary, translation))
+        segment_issues.extend(
+            _filtered_adversarial_issues(segment, translation, segment_issues)
+        )
+        issues.extend(segment_issues)
     return issues
+
+
+def _filtered_adversarial_issues(
+    segment: Segment,
+    translation: str,
+    existing_issues: list[QaIssue],
+) -> list[QaIssue]:
+    existing_categories = {issue.category for issue in existing_issues}
+    if existing_categories.intersection(OBJECTIVE_DUPLICATE_SUPPRESSORS):
+        return [
+            issue
+            for issue in detect_adversarial_qa_issues(segment, translation)
+            if issue.category
+            not in {"possible_entity_damage", "possible_omission", "possible_overly_literal"}
+        ]
+    return detect_adversarial_qa_issues(segment, translation)
 
 
 def _terminology_issues(

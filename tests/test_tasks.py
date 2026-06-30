@@ -1,7 +1,18 @@
 from pathlib import Path
 
-from agentic_language_translation_tool.models import BatchPurpose, Segment
-from agentic_language_translation_tool.tasks import create_batches, render_verification_batch
+from agentic_language_translation_tool.models import (
+    Batch,
+    BatchPurpose,
+    FindingCategory,
+    FindingSeverity,
+    Segment,
+    VerificationFinding,
+)
+from agentic_language_translation_tool.tasks import (
+    create_batches,
+    render_correction_batch,
+    render_verification_batch,
+)
 
 
 def test_verification_prompt_contains_concept_aware_criteria(tmp_path: Path) -> None:
@@ -23,6 +34,47 @@ def test_verification_prompt_contains_concept_aware_criteria(tmp_path: Path) -> 
 
     assert "hallucinations" in prompt
     assert "overly literal" in prompt
+    assert "added meaning" in prompt
+    assert "omitted meaning" in prompt
+    assert "false" in prompt
+    assert "concrete source and translation evidence" in prompt
+    assert "version strings" in prompt
     assert "Apple" in prompt
     assert "{product}" in prompt
     assert "<TRANSLATION_HERE>" in prompt
+
+
+def test_correction_prompt_contains_adversarial_checklist() -> None:
+    segment = Segment(
+        segment_id="seg_1",
+        source_text="Apple released Vision Pro 2.",
+        translated_text="Apfel hat Vision veroffentlicht.",
+        format="txt",
+        protected_terms=["Apple"],
+        checksum="abc",
+    )
+    batch = Batch(
+        batch_id="correction_0001",
+        purpose=BatchPurpose.CORRECTION,
+        segment_ids=[segment.segment_id],
+        token_estimate=10,
+        file="correction_batches/correction_0001.md",
+    )
+    finding = VerificationFinding(
+        finding_id="finding_1",
+        segment_id=segment.segment_id,
+        category=FindingCategory.ENTITY_DAMAGE,
+        severity=FindingSeverity.ERROR,
+        explanation="Brand and product name were damaged.",
+        evidence="Apple became Apfel.",
+        correction_guidance="Restore brand and product names.",
+    )
+
+    prompt = render_correction_batch(batch, segment, [finding])
+
+    assert "added meaning" in prompt
+    assert "omitted meaning" in prompt
+    assert "entity damage" in prompt
+    assert "false friends" in prompt
+    assert "tone/style drift" in prompt
+    assert "Brand and product name were damaged." in prompt

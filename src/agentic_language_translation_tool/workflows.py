@@ -8,9 +8,19 @@ import shutil
 from pathlib import Path
 from typing import TypeGuard, cast
 
+from agentic_language_translation_tool.glossary import (
+    GLOSSARY_FILE,
+    enrich_segments_with_glossary,
+    find_glossary_entries,
+    likely_terminology_drift,
+    load_glossary,
+    read_workspace_glossary,
+    term_in_text,
+)
 from agentic_language_translation_tool.io import (
     atomic_write_json,
     atomic_write_text,
+    file_sha256,
     read_jsonl_model,
     stable_id,
     write_jsonl,
@@ -20,6 +30,9 @@ from agentic_language_translation_tool.models import (
     BatchPurpose,
     BatchStatus,
     FindingSeverity,
+    Glossary,
+    GlossaryEntry,
+    GlossaryMetadata,
     JobManifest,
     JobStage,
     JobState,
@@ -29,7 +42,11 @@ from agentic_language_translation_tool.models import (
     TranslationRecord,
     VerificationFinding,
 )
-from agentic_language_translation_tool.tasks import render_correction_batch
+from agentic_language_translation_tool.tasks import (
+    render_correction_batch,
+    render_translation_batch,
+    render_verification_batch,
+)
 from agentic_language_translation_tool.workspace import (
     SEGMENTS_FILE,
     STRUCTURE_FILE,
@@ -43,6 +60,23 @@ from agentic_language_translation_tool.workspace import (
 QA_REPORT_JSON = "qa_report.json"
 QA_REPORT_MD = "qa_report.md"
 MARKDOWN_LINK_PATTERN = re.compile(r"\[[^\]]+\]\(([^)]+)\)")
+
+
+def apply_glossary(workspace: Path, glossary: Path) -> JobManifest:
+    """Apply or refresh a workspace glossary and regenerate task files."""
+    manifest = load_manifest(workspace)
+    normalized_glossary = load_glossary(glossary)
+    segments = enrich_segments_with_glossary(read_segments(workspace), normalized_glossary)
+    atomic_write_json(workspace / GLOSSARY_FILE, normalized_glossary)
+    write_jsonl(workspace / SEGMENTS_FILE, segments)
+    manifest.glossary = GlossaryMetadata(
+        source_file=normalized_glossary.source_file or glossary.name,
+        source_checksum=normalized_glossary.source_checksum or file_sha256(glossary),
+        applied_at=normalized_glossary.applied_at,
+    )
+    _regenerate_batch_files(workspace, manifest, segments)
+    _save_and_resume(workspace, manifest)
+    return manifest
 
 
 def apply_translations(workspace: Path, translations: Path, *, force: bool = False) -> JobManifest:
@@ -71,9 +105,12 @@ def apply_translations(workspace: Path, translations: Path, *, force: bool = Fal
     _persist_translation_input(workspace, translations, records)
     write_jsonl(workspace / SEGMENTS_FILE, segments)
     _refresh_translation_batch_statuses(manifest, segments)
+    verification_planned = any(
+        batch.purpose == BatchPurpose.VERIFICATION for batch in manifest.batches
+    )
     manifest.state.stage = (
         JobStage.VERIFICATION_PLANNED
-        if _all_segments_translated(segments)
+        if _all_segments_translated(segments) and verification_planned
         else JobStage.PARTIALLY_TRANSLATED
     )
     _save_and_resume(workspace, manifest)
@@ -149,8 +186,9 @@ def validate_job(workspace: Path) -> QaReport:
     """Run deterministic QA checks and write QA reports."""
     manifest = load_manifest(workspace)
     segments = read_segments(workspace)
+    glossary = read_workspace_glossary(workspace)
     issues: list[QaIssue] = []
-    issues.extend(_translation_issues(segments))
+    issues.extend(_translation_issues(segments, glossary))
     issues.extend(_verification_issues(manifest, segments))
     issues.extend(_finding_issues(manifest.findings))
 
@@ -237,6 +275,32 @@ def _persist_verification_input(
         write_jsonl(target, findings)
 
 
+def _regenerate_batch_files(
+    workspace: Path,
+    manifest: JobManifest,
+    segments: list[Segment],
+) -> None:
+    segments_by_id = {segment.segment_id: segment for segment in segments}
+    findings_by_segment = _actionable_findings_by_segment(manifest.findings)
+    for batch in manifest.batches:
+        batch_segments = [segments_by_id[segment_id] for segment_id in batch.segment_ids]
+        path = workspace / batch.file
+        if batch.purpose == BatchPurpose.TRANSLATION:
+            content = render_translation_batch(batch, batch_segments)
+        elif batch.purpose == BatchPurpose.VERIFICATION:
+            content = render_verification_batch(batch, batch_segments)
+        elif batch.purpose == BatchPurpose.CORRECTION and len(batch_segments) == 1:
+            segment = batch_segments[0]
+            content = render_correction_batch(
+                batch,
+                segment,
+                findings_by_segment.get(segment.segment_id, []),
+            )
+        else:
+            continue
+        atomic_write_text(path, content)
+
+
 def _refresh_translation_batch_statuses(manifest: JobManifest, segments: list[Segment]) -> None:
     translated_ids = {segment.segment_id for segment in segments if segment.translated_text}
     for batch in manifest.batches:
@@ -293,7 +357,7 @@ def _actionable_findings_by_segment(
     return grouped
 
 
-def _translation_issues(segments: list[Segment]) -> list[QaIssue]:
+def _translation_issues(segments: list[Segment], glossary: Glossary | None) -> list[QaIssue]:
     issues: list[QaIssue] = []
     for segment in segments:
         translation = segment.translated_text or ""
@@ -350,7 +414,90 @@ def _translation_issues(segments: list[Segment]) -> list[QaIssue]:
             )
         if "markdown" in segment.format:
             issues.extend(_markdown_link_issues(segment, translation))
+        if glossary is not None:
+            issues.extend(_terminology_issues(segment, glossary, translation))
     return issues
+
+
+def _terminology_issues(
+    segment: Segment,
+    glossary: Glossary,
+    translation: str,
+) -> list[QaIssue]:
+    issues: list[QaIssue] = []
+    for entry in find_glossary_entries(segment.source_text, glossary):
+        if entry.do_not_translate and not term_in_text(entry.source_term, translation, entry):
+            issues.append(
+                _issue(
+                    segment.segment_id,
+                    "do_not_translate_term_changed",
+                    FindingSeverity.ERROR,
+                    f"Do-not-translate term changed or missing: {entry.source_term}.",
+                )
+            )
+        if entry.required_translation and not _contains_rule_text(
+            translation,
+            entry.required_translation,
+            entry,
+        ):
+            issues.append(
+                _issue(
+                    segment.segment_id,
+                    "required_translation_missing",
+                    FindingSeverity.ERROR,
+                    f"Missing required translation: {entry.required_translation}.",
+                )
+            )
+            issues.extend(_drift_issue(segment, entry, entry.required_translation, translation))
+        if (
+            entry.preferred_translation
+            and entry.preferred_translation != entry.required_translation
+            and not _contains_rule_text(translation, entry.preferred_translation, entry)
+        ):
+            issues.append(
+                _issue(
+                    segment.segment_id,
+                    "preferred_translation_missing",
+                    FindingSeverity.WARNING,
+                    f"Missing preferred translation: {entry.preferred_translation}.",
+                )
+            )
+            issues.extend(_drift_issue(segment, entry, entry.preferred_translation, translation))
+        for forbidden in entry.forbidden_translations:
+            if _contains_rule_text(translation, forbidden, entry):
+                issues.append(
+                    _issue(
+                        segment.segment_id,
+                        "forbidden_translation_used",
+                        FindingSeverity.ERROR,
+                        f"Forbidden translation used: {forbidden}.",
+                    )
+                )
+    return issues
+
+
+def _drift_issue(
+    segment: Segment,
+    entry: GlossaryEntry,
+    expected: str,
+    translation: str,
+) -> list[QaIssue]:
+    if not likely_terminology_drift(expected, translation):
+        return []
+    return [
+        _issue(
+            segment.segment_id,
+            "terminology_drift",
+            FindingSeverity.WARNING,
+            f"Possible terminology drift for {entry.source_term}; expected {expected}.",
+        )
+    ]
+
+
+def _contains_rule_text(text: str, expected: str, entry: GlossaryEntry) -> bool:
+    if entry.case_sensitive:
+        return expected in text
+    return expected.casefold() in text.casefold()
 
 
 def _verification_issues(manifest: JobManifest, segments: list[Segment]) -> list[QaIssue]:

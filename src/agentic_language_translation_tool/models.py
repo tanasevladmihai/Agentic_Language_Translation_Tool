@@ -167,6 +167,71 @@ class QaReport(WorkspaceModel):
     issues: list[QaIssue] = Field(default_factory=list)
 
 
+class GlossaryEntry(WorkspaceModel):
+    """A terminology rule supplied by the user."""
+
+    source_term: str
+    required_translation: str | None = None
+    preferred_translation: str | None = None
+    forbidden_translations: list[str] = Field(default_factory=list)
+    case_sensitive: bool = False
+    do_not_translate: bool = False
+    context: str | None = None
+    notes: str | None = None
+
+    @field_validator("source_term")
+    @classmethod
+    def require_source_term(cls, value: str) -> str:
+        """Reject empty source terms."""
+        if not value.strip():
+            raise ValueError("source_term must not be empty")
+        return value.strip()
+
+    @field_validator(
+        "required_translation",
+        "preferred_translation",
+        "context",
+        "notes",
+        mode="before",
+    )
+    @classmethod
+    def normalize_optional_text(cls, value: object) -> str | None:
+        """Normalize blank optional text fields to None."""
+        if value is None:
+            return None
+        text = str(value).strip()
+        return text or None
+
+    @field_validator("forbidden_translations", mode="before")
+    @classmethod
+    def normalize_forbidden_terms(cls, value: object) -> list[str]:
+        """Normalize forbidden translation entries."""
+        if value is None or value == "":
+            return []
+        if isinstance(value, str):
+            return [part.strip() for part in value.split(";") if part.strip()]
+        if isinstance(value, list):
+            return [str(part).strip() for part in value if str(part).strip()]
+        raise ValueError("forbidden_translations must be a list or semicolon-separated string")
+
+
+class Glossary(WorkspaceModel):
+    """A normalized glossary stored in the workspace protocol."""
+
+    entries: list[GlossaryEntry]
+    source_file: str | None = None
+    source_checksum: str | None = None
+    applied_at: datetime = Field(default_factory=utc_now)
+
+
+class GlossaryMetadata(WorkspaceModel):
+    """Manifest metadata for the currently applied glossary."""
+
+    source_file: str
+    source_checksum: str
+    applied_at: datetime = Field(default_factory=utc_now)
+
+
 class JobState(WorkspaceModel):
     """Resumable state summary for a translation job."""
 
@@ -193,6 +258,7 @@ class JobManifest(WorkspaceModel):
     state: JobState = Field(default_factory=JobState)
     batches: list[Batch] = Field(default_factory=list)
     findings: list[VerificationFinding] = Field(default_factory=list)
+    glossary: GlossaryMetadata | None = None
 
     def touch(self) -> None:
         """Update the manifest timestamp."""

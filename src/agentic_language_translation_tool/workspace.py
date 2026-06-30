@@ -7,6 +7,11 @@ from pathlib import Path
 
 from agentic_language_translation_tool import __version__
 from agentic_language_translation_tool.extractors import extract_document
+from agentic_language_translation_tool.glossary import (
+    GLOSSARY_FILE,
+    enrich_segments_with_glossary,
+    load_glossary,
+)
 from agentic_language_translation_tool.io import (
     atomic_write_json,
     atomic_write_text,
@@ -20,6 +25,7 @@ from agentic_language_translation_tool.models import (
     Batch,
     BatchPurpose,
     BatchStatus,
+    GlossaryMetadata,
     JobManifest,
     JobStage,
     JobState,
@@ -43,51 +49,70 @@ def init_workspace(
     *,
     source_language: str,
     target_language: str,
+    glossary: Path | None = None,
     force: bool = False,
 ) -> JobManifest:
-    """Create or reuse a deterministic translation workspace."""
+    """Create or reuse a full convenience translation workspace."""
+    if (workspace / JOB_FILE).exists() and not force:
+        manifest = load_manifest(workspace)
+        write_resume(workspace, manifest)
+        return manifest
+    manifest = extract_to_workspace(
+        source,
+        workspace,
+        source_language=source_language,
+        target_language=target_language,
+        glossary=glossary,
+        force=force,
+    )
+    manifest = plan_translation_batches(workspace, force=True)
+    manifest = plan_verification_batches(workspace, force=True)
+    manifest.state = _state_from_batches(JobStage.TRANSLATION_PLANNED, manifest.batches, workspace)
+    save_manifest(workspace, manifest)
+    write_resume(workspace, manifest)
+    return manifest
+
+
+def extract_to_workspace(
+    source: Path,
+    workspace: Path,
+    *,
+    source_language: str,
+    target_language: str,
+    glossary: Path | None = None,
+    force: bool = False,
+) -> JobManifest:
+    """Extract a source document into a resumable workspace without planning batches."""
     source = source.resolve()
     workspace = workspace.resolve()
     if not source.exists():
         raise FileNotFoundError(source)
     if (workspace / JOB_FILE).exists() and not force:
-        manifest = load_manifest(workspace)
-        write_resume(workspace, manifest)
-        return manifest
+        raise WorkspaceError(f"workspace already contains extracted work: {workspace}")
     if workspace.exists() and any(workspace.iterdir()) and not force:
         raise WorkspaceError(f"workspace already exists and is not empty: {workspace}")
 
-    workspace.mkdir(parents=True, exist_ok=True)
-    for directory in [
-        "source",
-        "translation_batches",
-        "translations",
-        "verification_batches",
-        "verification_results",
-        "correction_batches",
-        "output",
-    ]:
-        (workspace / directory).mkdir(parents=True, exist_ok=True)
+    _ensure_workspace_dirs(workspace)
 
     source_copy = workspace / "source" / source.name
     if not source_copy.exists() or force:
         shutil.copy2(source, source_copy)
 
     extraction = extract_document(source)
-    write_jsonl(workspace / SEGMENTS_FILE, extraction.segments)
+    segments = extraction.segments
+    glossary_metadata: GlossaryMetadata | None = None
+    if glossary is not None:
+        normalized_glossary = load_glossary(glossary)
+        atomic_write_json(workspace / GLOSSARY_FILE, normalized_glossary)
+        segments = enrich_segments_with_glossary(segments, normalized_glossary)
+        glossary_metadata = GlossaryMetadata(
+            source_file=normalized_glossary.source_file or glossary.name,
+            source_checksum=normalized_glossary.source_checksum or file_sha256(glossary),
+            applied_at=normalized_glossary.applied_at,
+        )
+    write_jsonl(workspace / SEGMENTS_FILE, segments)
     atomic_write_json(workspace / STRUCTURE_FILE, extraction.structure)
 
-    translation_batches = create_batches(
-        extraction.segments,
-        purpose=BatchPurpose.TRANSLATION,
-        output_dir=workspace / "translation_batches",
-    )
-    verification_batches = create_batches(
-        extraction.segments,
-        purpose=BatchPurpose.VERIFICATION,
-        output_dir=workspace / "verification_batches",
-    )
-    batches = translation_batches + verification_batches
     manifest = JobManifest(
         job_id=f"job_{stable_id(str(source), file_sha256(source))}",
         source_path=str(source),
@@ -96,9 +121,77 @@ def init_workspace(
         target_language=target_language,
         tool_version=__version__,
         source_checksum=file_sha256(source),
-        state=_state_from_batches(JobStage.TRANSLATION_PLANNED, batches, workspace),
-        batches=batches,
+        state=_state_from_batches(JobStage.EXTRACTED, [], workspace),
+        batches=[],
+        glossary=glossary_metadata,
     )
+    save_manifest(workspace, manifest)
+    write_resume(workspace, manifest)
+    return manifest
+
+
+def plan_translation_batches(
+    workspace: Path,
+    *,
+    max_segments: int = 10,
+    force: bool = False,
+) -> JobManifest:
+    """Plan translation task batches for an extracted workspace."""
+    manifest = load_manifest(workspace)
+    segments = read_segments(workspace)
+    existing = [batch for batch in manifest.batches if batch.purpose == BatchPurpose.TRANSLATION]
+    if existing and not force:
+        write_resume(workspace, manifest)
+        return manifest
+    _ensure_no_untracked_batch_files(workspace, "translation_batches", "translation_", force=force)
+    if force:
+        _remove_purpose_batches(workspace, manifest, BatchPurpose.TRANSLATION)
+    batches = create_batches(
+        segments,
+        purpose=BatchPurpose.TRANSLATION,
+        output_dir=workspace / "translation_batches",
+        max_segments=max_segments,
+    )
+    translated_ids = {segment.segment_id for segment in segments if segment.translated_text}
+    for batch in batches:
+        if set(batch.segment_ids) <= translated_ids:
+            batch.status = BatchStatus.TRANSLATED
+    manifest.batches.extend(batches)
+    manifest.state = _state_from_batches(JobStage.TRANSLATION_PLANNED, manifest.batches, workspace)
+    save_manifest(workspace, manifest)
+    write_resume(workspace, manifest)
+    return manifest
+
+
+def plan_verification_batches(
+    workspace: Path,
+    *,
+    max_segments: int = 10,
+    force: bool = False,
+) -> JobManifest:
+    """Plan verification task batches for a workspace's current segments."""
+    manifest = load_manifest(workspace)
+    segments = read_segments(workspace)
+    existing = [batch for batch in manifest.batches if batch.purpose == BatchPurpose.VERIFICATION]
+    if existing and not force:
+        write_resume(workspace, manifest)
+        return manifest
+    _ensure_no_untracked_batch_files(
+        workspace,
+        "verification_batches",
+        "verification_",
+        force=force,
+    )
+    if force:
+        _remove_purpose_batches(workspace, manifest, BatchPurpose.VERIFICATION)
+    batches = create_batches(
+        segments,
+        purpose=BatchPurpose.VERIFICATION,
+        output_dir=workspace / "verification_batches",
+        max_segments=max_segments,
+    )
+    manifest.batches.extend(batches)
+    manifest.state = _state_from_batches(JobStage.VERIFICATION_PLANNED, manifest.batches, workspace)
     save_manifest(workspace, manifest)
     write_resume(workspace, manifest)
     return manifest
@@ -113,6 +206,51 @@ def save_manifest(workspace: Path, manifest: JobManifest) -> None:
     """Persist a manifest and refresh its timestamp."""
     manifest.touch()
     atomic_write_json(workspace / JOB_FILE, manifest)
+
+
+def _ensure_workspace_dirs(workspace: Path) -> None:
+    workspace.mkdir(parents=True, exist_ok=True)
+    for directory in [
+        "source",
+        "translation_batches",
+        "translations",
+        "verification_batches",
+        "verification_results",
+        "correction_batches",
+        "output",
+    ]:
+        (workspace / directory).mkdir(parents=True, exist_ok=True)
+
+
+def _ensure_no_untracked_batch_files(
+    workspace: Path,
+    directory: str,
+    prefix: str,
+    *,
+    force: bool,
+) -> None:
+    if force:
+        return
+    existing_files = sorted((workspace / directory).glob(f"{prefix}*.md"))
+    if existing_files:
+        relative = ", ".join(str(path.relative_to(workspace)) for path in existing_files)
+        raise WorkspaceError(f"batch files already exist; pass --force to replace: {relative}")
+
+
+def _remove_purpose_batches(
+    workspace: Path,
+    manifest: JobManifest,
+    purpose: BatchPurpose,
+) -> None:
+    remaining: list[Batch] = []
+    for batch in manifest.batches:
+        if batch.purpose == purpose:
+            batch_file = workspace / batch.file
+            if batch_file.exists():
+                batch_file.unlink()
+        else:
+            remaining.append(batch)
+    manifest.batches = remaining
 
 
 def validate_workspace(workspace: Path) -> list[str]:
@@ -135,6 +273,8 @@ def validate_workspace(workspace: Path) -> list[str]:
             errors.append(
                 f"batch {batch.batch_id} references missing segments: {', '.join(missing)}"
             )
+    if manifest.glossary is not None and not (workspace / GLOSSARY_FILE).exists():
+        errors.append(f"missing {GLOSSARY_FILE}")
     return errors
 
 
@@ -181,6 +321,7 @@ def write_resume(workspace: Path, manifest: JobManifest) -> str:
         "- `job.json`",
         "- `resume.md`",
         "- `segments.jsonl`",
+        "- `glossary.json` if present",
         "- `translation_batches/`",
         "- `verification_batches/`",
         "",
@@ -220,10 +361,12 @@ def _state_from_batches(stage: JobStage, batches: list[Batch], workspace: Path) 
 def _next_command(stage: JobStage, pending: list[str], workspace: Path) -> str:
     if pending:
         return f"Open the next pending batch `{pending[0]}` in `{workspace}`."
+    if stage == JobStage.EXTRACTED:
+        return f"altt plan-batches {workspace}"
     if stage == JobStage.TRANSLATION_PLANNED:
         return f"altt validate-workspace {workspace}"
     if stage == JobStage.PARTIALLY_TRANSLATED:
-        return f"altt apply-translations {workspace} --translations <path>"
+        return f"altt plan-verification {workspace}"
     if stage == JobStage.VERIFICATION_PLANNED:
         return f"altt validate {workspace}"
     if stage == JobStage.CORRECTIONS_PLANNED:

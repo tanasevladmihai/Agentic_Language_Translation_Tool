@@ -10,7 +10,9 @@ import typer
 from rich.console import Console
 
 from agentic_language_translation_tool.extractors import inspect_input
+from agentic_language_translation_tool.glossary import GlossaryError
 from agentic_language_translation_tool.workflows import (
+    apply_glossary,
     apply_translations,
     apply_verification,
     plan_corrections,
@@ -19,7 +21,10 @@ from agentic_language_translation_tool.workflows import (
 )
 from agentic_language_translation_tool.workspace import (
     WorkspaceError,
+    extract_to_workspace,
     init_workspace,
+    plan_translation_batches,
+    plan_verification_batches,
     resume_summary,
     validate_workspace,
 )
@@ -40,6 +45,7 @@ def init_workspace_command(
     workspace: Annotated[Path, typer.Option("--workspace", "-w")],
     source_language: Annotated[str, typer.Option("--source-language", "-s")],
     target_language: Annotated[str, typer.Option("--target-language", "-t")],
+    glossary: Annotated[Path | None, typer.Option("--glossary", "-g", exists=True)] = None,
     force: Annotated[bool, typer.Option("--force")] = False,
 ) -> None:
     """Create a resumable translation workspace."""
@@ -49,11 +55,89 @@ def init_workspace_command(
             workspace,
             source_language=source_language,
             target_language=target_language,
+            glossary=glossary,
+            force=force,
+        )
+    except (GlossaryError, WorkspaceError) as error:
+        raise typer.BadParameter(str(error)) from error
+    console.print(f"Workspace ready: {manifest.workspace_path}")
+    console.print(f"Next: {manifest.state.next_command}")
+
+
+@app.command("extract")
+def extract_command(
+    input_path: Annotated[Path, typer.Argument(exists=True)],
+    workspace: Annotated[Path, typer.Option("--workspace", "-w")],
+    source_language: Annotated[str, typer.Option("--source-language", "-s")],
+    target_language: Annotated[str, typer.Option("--target-language", "-t")],
+    glossary: Annotated[Path | None, typer.Option("--glossary", "-g", exists=True)] = None,
+    force: Annotated[bool, typer.Option("--force")] = False,
+) -> None:
+    """Extract a document into a workspace without planning batches."""
+    try:
+        manifest = extract_to_workspace(
+            input_path,
+            workspace,
+            source_language=source_language,
+            target_language=target_language,
+            glossary=glossary,
+            force=force,
+        )
+    except (GlossaryError, WorkspaceError) as error:
+        raise typer.BadParameter(str(error)) from error
+    console.print(f"Extraction complete. Stage: {manifest.state.stage.value}")
+    console.print(f"Next: {manifest.state.next_command}")
+
+
+@app.command("plan-batches")
+def plan_batches_command(
+    workspace: Annotated[Path, typer.Argument(exists=True)],
+    max_segments: Annotated[int, typer.Option("--max-segments", min=1)] = 10,
+    force: Annotated[bool, typer.Option("--force")] = False,
+) -> None:
+    """Generate or refresh translation task batches."""
+    try:
+        manifest = plan_translation_batches(
+            workspace,
+            max_segments=max_segments,
             force=force,
         )
     except WorkspaceError as error:
         raise typer.BadParameter(str(error)) from error
-    console.print(f"Workspace ready: {manifest.workspace_path}")
+    console.print(f"Translation batch planning complete. Stage: {manifest.state.stage.value}")
+    console.print(f"Next: {manifest.state.next_command}")
+
+
+@app.command("plan-verification")
+def plan_verification_command(
+    workspace: Annotated[Path, typer.Argument(exists=True)],
+    max_segments: Annotated[int, typer.Option("--max-segments", min=1)] = 10,
+    force: Annotated[bool, typer.Option("--force")] = False,
+) -> None:
+    """Generate or refresh verification task batches."""
+    try:
+        manifest = plan_verification_batches(
+            workspace,
+            max_segments=max_segments,
+            force=force,
+        )
+    except WorkspaceError as error:
+        raise typer.BadParameter(str(error)) from error
+    console.print(f"Verification batch planning complete. Stage: {manifest.state.stage.value}")
+    console.print(f"Next: {manifest.state.next_command}")
+
+
+@app.command("apply-glossary")
+def apply_glossary_command(
+    workspace: Annotated[Path, typer.Argument(exists=True)],
+    glossary: Annotated[Path, typer.Option("--glossary", "-g", exists=True)],
+) -> None:
+    """Apply or refresh glossary rules for an existing workspace."""
+    try:
+        manifest = apply_glossary(workspace, glossary)
+    except (GlossaryError, WorkspaceError) as error:
+        raise typer.BadParameter(str(error)) from error
+    console.print(f"Glossary applied. Stage: {manifest.state.stage.value}")
     console.print(f"Next: {manifest.state.next_command}")
 
 

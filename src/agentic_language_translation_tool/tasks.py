@@ -120,6 +120,7 @@ def render_correction_batch(
 def _segment_section(segment: Segment, *, include_translation_placeholder: bool) -> list[str]:
     protected_terms = ", ".join(segment.protected_terms) if segment.protected_terms else "(none)"
     placeholders = ", ".join(segment.placeholders) if segment.placeholders else "(none)"
+    glossary_rules = [note for note in segment.notes if note.startswith("Glossary: ")]
     lines = [
         f"## {segment.segment_id}",
         "",
@@ -134,6 +135,10 @@ def _segment_section(segment: Segment, *, include_translation_placeholder: bool)
         "```",
         "",
     ]
+    if glossary_rules:
+        lines.extend(["Glossary Rules:", ""])
+        lines.extend(f"- {rule}" for rule in glossary_rules)
+        lines.append("")
     if include_translation_placeholder:
         lines.extend(
             [

@@ -57,7 +57,7 @@ warn_unused_configs = true
 disallow_untyped_defs = true
 
 [[tool.mypy.overrides]]
-module = ["docx", "docx.*", "fitz"]
+module = ["docx", "docx.*", "fitz", "regex"]
 ignore_missing_imports = true
 
 [tool.ruff]

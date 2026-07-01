@@ -38,7 +38,12 @@ def test_verification_prompt_contains_concept_aware_criteria(tmp_path: Path) -> 
     assert "omitted meaning" in prompt
     assert "false" in prompt
     assert "concrete source and translation evidence" in prompt
+    assert "do not assume" in prompt
     assert "version strings" in prompt
+    assert "v2.1" in prompt
+    assert "15%" in prompt
+    assert "API_KEY" in prompt
+    assert '"Export"' in prompt
     assert "Apple" in prompt
     assert "{product}" in prompt
     assert "<TRANSLATION_HERE>" in prompt
@@ -77,4 +82,7 @@ def test_correction_prompt_contains_adversarial_checklist() -> None:
     assert "entity damage" in prompt
     assert "false friends" in prompt
     assert "tone/style drift" in prompt
+    assert "source and target languages" in prompt
+    assert "version strings" in prompt
+    assert "quoted labels" in prompt
     assert "Brand and product name were damaged." in prompt

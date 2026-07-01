@@ -198,7 +198,14 @@ def validate_job(workspace: Path) -> QaReport:
     segments = read_segments(workspace)
     glossary = read_workspace_glossary(workspace)
     issues: list[QaIssue] = []
-    issues.extend(_translation_issues(segments, glossary))
+    issues.extend(
+        _translation_issues(
+            segments,
+            glossary,
+            source_language=manifest.source_language,
+            target_language=manifest.target_language,
+        )
+    )
     issues.extend(_verification_issues(manifest, segments))
     issues.extend(_finding_issues(manifest.findings))
 
@@ -367,7 +374,13 @@ def _actionable_findings_by_segment(
     return grouped
 
 
-def _translation_issues(segments: list[Segment], glossary: Glossary | None) -> list[QaIssue]:
+def _translation_issues(
+    segments: list[Segment],
+    glossary: Glossary | None,
+    *,
+    source_language: str = "",
+    target_language: str = "",
+) -> list[QaIssue]:
     issues: list[QaIssue] = []
     for segment in segments:
         segment_issues: list[QaIssue] = []
@@ -429,7 +442,13 @@ def _translation_issues(segments: list[Segment], glossary: Glossary | None) -> l
         if glossary is not None:
             segment_issues.extend(_terminology_issues(segment, glossary, translation))
         segment_issues.extend(
-            _filtered_adversarial_issues(segment, translation, segment_issues)
+            _filtered_adversarial_issues(
+                segment,
+                translation,
+                segment_issues,
+                source_language=source_language,
+                target_language=target_language,
+            )
         )
         issues.extend(segment_issues)
     return issues
@@ -439,16 +458,25 @@ def _filtered_adversarial_issues(
     segment: Segment,
     translation: str,
     existing_issues: list[QaIssue],
+    *,
+    source_language: str,
+    target_language: str,
 ) -> list[QaIssue]:
     existing_categories = {issue.category for issue in existing_issues}
+    adversarial_issues = detect_adversarial_qa_issues(
+        segment,
+        translation,
+        source_language=source_language,
+        target_language=target_language,
+    )
     if existing_categories.intersection(OBJECTIVE_DUPLICATE_SUPPRESSORS):
         return [
             issue
-            for issue in detect_adversarial_qa_issues(segment, translation)
+            for issue in adversarial_issues
             if issue.category
             not in {"possible_entity_damage", "possible_omission", "possible_overly_literal"}
         ]
-    return detect_adversarial_qa_issues(segment, translation)
+    return adversarial_issues
 
 
 def _terminology_issues(
